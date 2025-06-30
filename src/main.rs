@@ -1,47 +1,43 @@
 use actix_web::{get, post, App, web, HttpResponse, HttpServer, Responder};
 use serde::Serialize;
+use  solana_sdk :: { signature :: Keypair ,  signer :: Signer };
+use solana_sdk::bs58;
 
 #[derive(Serialize)]
-struct ApiRes {
-    id: u8,
-    message: String,
-    status: String,
+struct keypairData {
+    pubkey: String,
+    secret: String
 }
 
 
-#[get("/")]
-async fn get_data() -> impl Responder {
+#[derive(Serialize)]
+struct KeypairRes {
+    success: bool,
+    data: keypairData
+}
 
-    let serverdir = std::fs::read_to_string("index.html");
 
-    match serverdir {
-        Ok(html) => HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(html),
-        Err(e) => {
-            eprintln!("erroor :{}", e);
-            HttpResponse::InternalServerError().body("something is wrong")
+#[post("/keypair")]
+async fn keypair_generate(req_body: String) -> impl Responder {
+
+
+    let keypair = Keypair::new();
+    let address  =  keypair.pubkey().to_string();
+    let secret = bs58::encode(keypair.to_bytes()).into_string();
+
+    let res = KeypairRes {
+        success: true,
+        data: keypairData {
+            pubkey: address,
+            secret,
         }
-
-    }
-}
-
-
-#[post("/")]
-async fn post_data(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
-
-#[get("/jsondata")]
-async fn json_data() -> impl Responder {
-    let res = ApiRes {
-        id: 1,
-        message: "Json response".to_string(),
-        status: "Success reponse: 200".to_string(),
     };
 
     web::Json(res)
 }
+
+
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -51,9 +47,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(|| {
         App::new()
-            .service(get_data)
-            .service(post_data)
-            .service(json_data)
+            .service(keypair_generate)
     })
     .bind(port)?
     .run()
