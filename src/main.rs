@@ -1,4 +1,12 @@
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, App, web, HttpResponse, HttpServer, Responder};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct ApiRes {
+    id: u8,
+    message: String,
+    status: String,
+}
 
 
 #[get("/")]
@@ -24,11 +32,16 @@ async fn post_data(req_body: String) -> impl Responder {
     HttpResponse::Ok().body(req_body)
 }
 
+#[get("/jsondata")]
+async fn json_data() -> impl Responder {
+    let res = ApiRes {
+        id: 1,
+        message: "Json response".to_string(),
+        status: "Success reponse: 200".to_string(),
+    };
 
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("server is working")
+    web::Json(res)
 }
-
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -40,7 +53,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .service(get_data)
             .service(post_data)
-            .route("/health", web::get().to(manual_hello))
+            .service(json_data)
     })
     .bind(port)?
     .run()
