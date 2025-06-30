@@ -1,9 +1,10 @@
-use actix_web::{get, post, App, web, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, App, web, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signature, Signer},
     signer::keypair::keypair_from_seed,
+    system_instruction::transfer,
 };
 use solana_system_program::system_instruction;
 use base64::{engine::general_purpose, Engine};
@@ -69,6 +70,28 @@ struct VerifyMessageData {
     message: String,
     pubkey: String,
 }
+
+#[derive(Deserialize)]
+struct SendSolRequest {
+    from: String,
+    to: String,
+    lamports: u64,
+}
+
+#[derive(Serialize)]
+struct SendSolResponse {
+    success: bool,
+    data: Option<SendSolData>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SendSolData {
+    program_id: String,
+    accounts: Vec<String>,
+    instruction_data: String,
+}
+
 
 #[post("/keypair")]
 async fn keypair_generate(req_body: String) -> impl Responder {
@@ -222,6 +245,81 @@ async fn verify_message(req_body: web::Json<VerifyMessageRequest>) -> impl Respo
     web::Json(response)
 }
 
+#[post("/send/sol")]
+async fn send_sol(req_body: web::Json<SendSolRequest>) -> impl Responder {
+    let request = req_body.into_inner();
+
+    if request.from.is_empty() || request.to.is_empty() {
+        return web::Json(SendSolResponse {
+            success: false,
+            data: None,
+            error: Some("Missing required fields: from and to addresses are required".to_string()),
+        });
+    }
+
+    if request.lamports == 0 {
+        return web::Json(SendSolResponse {
+            success: false,
+            data: None,
+            error: Some("Lamports must be greater than zero".to_string()),
+        });
+    }
+
+
+    let from_pubkey = match request.from.parse::<Pubkey>() {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return web::Json(SendSolResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid sender address format".to_string()),
+            });
+        }
+    };
+
+ 
+    let to_pubkey = match request.to.parse::<Pubkey>() {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return web::Json(SendSolResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid recipient address format".to_string()),
+            });
+        }
+    };
+
+   
+    if from_pubkey == to_pubkey {
+        return web::Json(SendSolResponse {
+            success: false,
+            data: None,
+            error: Some("Cannot transfer to the same address".to_string()),
+        });
+    }
+
+   
+    let instruction = transfer(&from_pubkey, &to_pubkey, request.lamports);
+    
+    
+    let instruction_data_b64 = general_purpose::STANDARD.encode(&instruction.data);
+
+    let response = SendSolResponse {
+        success: true,
+        data: Some(SendSolData {
+            program_id: instruction.program_id.to_string(),
+            accounts: instruction
+                .accounts
+                .iter()
+                .map(|account| account.pubkey.to_string())
+                .collect(),
+            instruction_data: instruction_data_b64,
+        }),
+        error: None,
+    };
+
+    web::Json(response)
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -234,6 +332,8 @@ async fn main() -> std::io::Result<()> {
             .service(keypair_generate)
             .service(sign_message)
             .service(verify_message)
+            .service(send_sol)
+           
     })
     .bind(port)?
     .run()
