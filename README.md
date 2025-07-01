@@ -97,6 +97,7 @@ Generate keypairs, handle SPL tokens, sign/verify messages, and construct valid 
             "public_key": "base58-encoded-public-key",
             "message": "Hello, Solana!"
         }
+        
     }
 
 ```
