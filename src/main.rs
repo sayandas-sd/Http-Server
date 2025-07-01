@@ -1,28 +1,20 @@
-use actix_web::{get, post, App, web, HttpServer, Responder};
-use serde::{Deserialize, Serialize};
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::{Keypair, Signature, Signer},
-    signer::keypair::keypair_from_seed,
-    system_instruction::transfer,
-};
-use solana_system_program::system_instruction;
-use base64::{engine::general_purpose, Engine};
+use std::str::FromStr;
+use tiny_http::{Header, Server, Response, Method};
+use solana_sdk::{signature::Keypair, signer::Signer, pubkey:: Pubkey};
+use spl_token::{instruction::initialize_mint};
+use serde::{Serialize, Deserialize};
 use bs58;
-
-#[derive(Serialize)]
-struct keypairData {
-    pubkey: String,
-    secret: String
-}
+use base64::{engine::general_purpose, Engine};
+use spl_token::instruction::mint_to;
+use serde_json::json;
+use solana_sdk::signature::Signature;
 
 
 #[derive(Serialize)]
-struct KeypairRes {
+struct KeypairResponse {
     success: bool,
-    data: keypairData
+    data: KeypairData,
 }
-
 
 #[derive(Serialize)]
 struct KeypairData {
@@ -30,11 +22,51 @@ struct KeypairData {
     secret: String,
 }
 
+#[derive(Deserialize)]
+struct CreateTokenRequest {
+    mintAuthority: String,
+    mint: String,
+    decimals: u8,
+}
+
+#[derive(Serialize)]
+struct CreateTokenResponse {
+    success: bool,
+    data: TokenData,
+}
+
+#[derive(Serialize)]
+struct TokenData {
+    program_id: String,
+    accounts: Vec<AccountMetaData>,
+    instruction_data: String,
+}
+
+#[derive(Serialize)]
+struct AccountMetaData {
+    pubkey: String,
+    is_signer: bool,
+    is_writable: bool,
+}
+
+#[derive(Deserialize)]
+struct MintTokenRequest {
+    mint: String,
+    destination: String,
+    authority: String,
+    amount: u64,
+}
+
+#[derive(Deserialize)]
+struct SignMessageRequest {
+    message: String,
+    secret: String,
+}
+
 #[derive(Serialize)]
 struct SignMessageResponse {
     success: bool,
-    data: Option<SignMessageData>,
-    error: Option<String>,
+    data: SignMessageData,
 }
 
 #[derive(Serialize)]
@@ -42,12 +74,6 @@ struct SignMessageData {
     signature: String,
     public_key: String,
     message: String,
-}
-
-#[derive(Deserialize)]
-struct SignMessageRequest {
-    message: String,
-    secret: String,
 }
 
 #[derive(Deserialize)]
@@ -60,8 +86,7 @@ struct VerifyMessageRequest {
 #[derive(Serialize)]
 struct VerifyMessageResponse {
     success: bool,
-    data: Option<VerifyMessageData>,
-    error: Option<String>,
+    data: VerifyMessageData,
 }
 
 #[derive(Serialize)]
@@ -71,271 +96,296 @@ struct VerifyMessageData {
     pubkey: String,
 }
 
-#[derive(Deserialize)]
-struct SendSolRequest {
-    from: String,
-    to: String,
-    lamports: u64,
-}
-
-#[derive(Serialize)]
-struct SendSolResponse {
-    success: bool,
-    data: Option<SendSolData>,
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct SendSolData {
-    program_id: String,
-    accounts: Vec<String>,
-    instruction_data: String,
-}
 
 
-#[post("/keypair")]
-async fn keypair_generate(req_body: String) -> impl Responder {
+fn main() {
+    let server = Server::http("0.0.0.0:8080").unwrap();
+    println!("🚀 Server running at http://localhost:8080");
 
+    for mut request in server.incoming_requests() {
+        match (request.method(), request.url()) {
+            (&Method::Post, "/keypair") => {
+                let keypair = Keypair::new();
+                let pubkey = keypair.pubkey().to_string();
+                let secret = bs58::encode(keypair.to_bytes()).into_string();
 
-    let keypair = Keypair::new();
-    let address  =  keypair.pubkey().to_string();
-    let secret = bs58::encode(keypair.to_bytes()).into_string();
+                let response_data = KeypairResponse {
+                    success: true,
+                    data: KeypairData { pubkey, secret },
+                };
 
-    let res = KeypairRes {
-        success: true,
-        data: keypairData {
-            pubkey: address,
-            secret,
-        }
-    };
+                let json = serde_json::to_string(&response_data).unwrap();
+                let response = Response::from_string(json)
+                    .with_status_code(200)
+                    .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
 
-    web::Json(res)
-}
-
-
-
-#[post("/message/sign")]
-async fn sign_message(req_body: web::Json<SignMessageRequest>) -> impl Responder {
-   let request = req_body.into_inner();
-
-    if request.message.is_empty() || request.secret.is_empty() {
-        return web::Json(SignMessageResponse {
-            success: false,
-            data: None,
-            error: Some("Missing required fields".to_string()),
-        });
-    }
-
-    let secret_bytes = match bs58::decode(&request.secret).into_vec() {
-        Ok(bytes) => {
-            if bytes.len() != 64 {
-                return web::Json(SignMessageResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid secret key length".to_string()),
-                });
+                let _ = request.respond(response);
             }
-            bytes
-        }
-        Err(_) => {
-            return web::Json(SignMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid base58-encoded secret key".to_string()),
-            });
-        }
-    };
 
-    let keypair = match keypair_from_seed(&secret_bytes) {
-        Ok(keypair) => keypair,
-        Err(_) => {
-            return web::Json(SignMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Failed to create keypair from secret key".to_string()),
-            });
-        }
-    };
+            (&Method::Post, "/token/create") => {
+                let mut content = String::new();
+                let _ = request.as_reader().read_to_string(&mut content);
 
-    let message_bytes = request.message.as_bytes();
-    let signature = keypair.sign_message(message_bytes);
-    let signature_b64 = base64::encode(signature.as_ref());
+                let req_data: Result<CreateTokenRequest, _> = serde_json::from_str(&content);
 
-    let response = SignMessageResponse {
-        success: true,
-        data: Some(SignMessageData {
-            signature: signature_b64,
-            public_key: keypair.pubkey().to_string(),
-            message: request.message,
-        }),
-        error: None,
-    };
+                if let Ok(data) = req_data {
+                    let mint_pubkey = Pubkey::from_str(&data.mint).unwrap();
+                    let mint_authority = Pubkey::from_str(&data.mintAuthority).unwrap();
 
-    web::Json(response)
-}
+                    let ix = initialize_mint(
+                        &spl_token::id(),
+                        &mint_pubkey,
+                        &mint_authority,
+                        None,
+                        data.decimals,
+                    ).unwrap();
 
+                    let accounts = ix.accounts.iter().map(|meta| {
+                        AccountMetaData {
+                            pubkey: meta.pubkey.to_string(),
+                            is_signer: meta.is_signer,
+                            is_writable: meta.is_writable,
+                        }
+                    }).collect::<Vec<_>>();
 
-#[post("/message/verify")]
-async fn verify_message(req_body: web::Json<VerifyMessageRequest>) -> impl Responder {
-    let request = req_body.into_inner();
+                    let response_data = CreateTokenResponse {
+                        success: true,
+                        data: TokenData {
+                            program_id: ix.program_id.to_string(),
+                            accounts,
+                            instruction_data: general_purpose::STANDARD.encode(ix.data),
+                        },
+                    };
 
-    if request.message.is_empty() || request.signature.is_empty() || request.pubkey.is_empty() {
-        return web::Json(VerifyMessageResponse {
-            success: false,
-            data: None,
-            error: Some("Missing required fields".to_string()),
-        });
-    }
+                    let json = serde_json::to_string(&response_data).unwrap();
+                    let response = Response::from_string(json)
+                        .with_status_code(200)
+                        .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
 
-    let pubkey = match request.pubkey.parse::<Pubkey>() {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return web::Json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid public key".to_string()),
-            });
-        }
-    };
+                    let _ = request.respond(response);
+                } else {
+                    let response = Response::from_string("{\"success\":false,\"error\":\"Invalid JSON\"}")
+                        .with_status_code(400)
+                        .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
 
-    let signature_bytes = match general_purpose::STANDARD.decode(&request.signature) {
-        Ok(bytes) => {
-            if bytes.len() != 64 {
-                return web::Json(VerifyMessageResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid signature length".to_string()),
-                });
+                    let _ = request.respond(response);
+                }
             }
-            bytes
+
+            (&Method::Post, "/token/mint") => {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+
+                    let req_data: Result<MintTokenRequest, _> = serde_json::from_str(&content);
+
+                    if let Ok(data) = req_data {
+                        let mint_pubkey = Pubkey::from_str(&data.mint).unwrap();
+                        let dest_pubkey = Pubkey::from_str(&data.destination).unwrap();
+                        let authority_pubkey = Pubkey::from_str(&data.authority).unwrap();
+
+                        // Build mint_to instruction
+                        let ix = mint_to(
+                            &spl_token::id(),
+                            &mint_pubkey,
+                            &dest_pubkey,
+                            &authority_pubkey,
+                            &[],
+                            data.amount,
+                        ).unwrap();
+
+
+                        let accounts = ix.accounts.iter().map(|meta| {
+                            AccountMetaData {
+                                pubkey: meta.pubkey.to_string(),
+                                is_signer: meta.is_signer,
+                                is_writable: meta.is_writable,
+                            }
+                        }).collect::<Vec<_>>();
+
+                        let response_data = CreateTokenResponse {
+                            success: true,
+                            data: TokenData {
+                                program_id: ix.program_id.to_string(),
+                                accounts,
+                                instruction_data: general_purpose::STANDARD.encode(ix.data),
+                            },
+                        };
+
+                        let json = serde_json::to_string(&response_data).unwrap();
+                        let response = Response::from_string(json)
+                            .with_status_code(200)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    } else {
+                        let response = Response::from_string("{\"success\":false,\"error\":\"Invalid JSON\"}")
+                            .with_status_code(400)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    }
+                }
+
+
+            (&Method::Post, "/message/sign") => {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+
+                    let req_data: Result<SignMessageRequest, _> = serde_json::from_str(&content);
+
+                    if let Ok(data) = req_data {
+                        if data.message.is_empty() || data.secret.is_empty() {
+                            let response = Response::from_string(
+                                json!({ "success": false, "error": "Missing required fields" }).to_string()
+                            )
+                            .with_status_code(400)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        // Decode secret key from base58
+                        let secret_bytes = match bs58::decode(&data.secret).into_vec() {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid secret key encoding" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        // Convert secret bytes to Keypair
+                        let keypair = match Keypair::from_bytes(&secret_bytes) {
+                            Ok(kp) => kp,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid secret key length" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        // Sign the message
+                        let signature = keypair.sign_message(data.message.as_bytes());
+
+                        let response_data = SignMessageResponse {
+                            success: true,
+                            data: SignMessageData {
+                                signature: base64::engine::general_purpose::STANDARD.encode(signature.as_ref()),
+                                public_key: keypair.pubkey().to_string(),
+                                message: data.message,
+                            },
+                        };
+
+                        let json = serde_json::to_string(&response_data).unwrap();
+                        let response = Response::from_string(json)
+                            .with_status_code(200)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    } else {
+                        let response = Response::from_string(
+                            json!({ "success": false, "error": "Invalid JSON" }).to_string()
+                        )
+                        .with_status_code(400)
+                        .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    }
+                }
+
+            (&Method::Post, "/message/verify") => {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+
+                    let req_data: Result<VerifyMessageRequest, _> = serde_json::from_str(&content);
+
+                    if let Ok(data) = req_data {
+                        // Decode signature from base64
+                        let signature_bytes = match base64::engine::general_purpose::STANDARD.decode(&data.signature) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid signature encoding" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        // Parse public key
+                        let pubkey = match Pubkey::from_str(&data.pubkey) {
+                            Ok(pk) => pk,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid pubkey format" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        // Parse signature bytes into Signature type
+                        let signature = match Signature::try_from(signature_bytes.as_slice()) {
+                            Ok(sig) => sig,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid signature length" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        // Verify
+                        let valid = signature.verify(pubkey.as_ref(), data.message.as_bytes());
+
+                        let response_data = VerifyMessageResponse {
+                            success: true,
+                            data: VerifyMessageData {
+                                valid,
+                                message: data.message,
+                                pubkey: pubkey.to_string(),
+                            },
+                        };
+
+                        let json = serde_json::to_string(&response_data).unwrap();
+                        let response = Response::from_string(json)
+                            .with_status_code(200)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    } else {
+                        let response = Response::from_string(
+                            json!({ "success": false, "error": "Invalid JSON" }).to_string()
+                        )
+                        .with_status_code(400)
+                        .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    }
+                }
+
+            _ => {
+                let response = Response::from_string("{\"success\":false,\"error\":\"Not Found\"}")
+                    .with_status_code(404)
+                    .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                let _ = request.respond(response);
+            }
         }
-        Err(_) => {
-            return web::Json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid base64-encoded signature".to_string()),
-            });
-        }
-    };
-
-    let signature = match Signature::try_from(signature_bytes) {
-        Ok(sig) => sig,
-        Err(_) => {
-            return web::Json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid signature format".to_string()),
-            });
-        }
-    };
-
-    let message_bytes = request.message.as_bytes();
-    let is_valid = signature.verify(pubkey.as_ref(), message_bytes);
-
-    let response = VerifyMessageResponse {
-        success: true,
-        data: Some(VerifyMessageData {
-            valid: is_valid,
-            message: request.message,
-            pubkey: request.pubkey,
-        }),
-        error: None,
-    };
-
-    web::Json(response)
-}
-
-#[post("/send/sol")]
-async fn send_sol(req_body: web::Json<SendSolRequest>) -> impl Responder {
-    let request = req_body.into_inner();
-
-    if request.from.is_empty() || request.to.is_empty() {
-        return web::Json(SendSolResponse {
-            success: false,
-            data: None,
-            error: Some("Missing required fields: from and to addresses are required".to_string()),
-        });
     }
-
-    if request.lamports == 0 {
-        return web::Json(SendSolResponse {
-            success: false,
-            data: None,
-            error: Some("Lamports must be greater than zero".to_string()),
-        });
-    }
-
-
-    let from_pubkey = match request.from.parse::<Pubkey>() {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return web::Json(SendSolResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid sender address format".to_string()),
-            });
-        }
-    };
-
- 
-    let to_pubkey = match request.to.parse::<Pubkey>() {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return web::Json(SendSolResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid recipient address format".to_string()),
-            });
-        }
-    };
-
-   
-    if from_pubkey == to_pubkey {
-        return web::Json(SendSolResponse {
-            success: false,
-            data: None,
-            error: Some("Cannot transfer to the same address".to_string()),
-        });
-    }
-
-   
-    let instruction = transfer(&from_pubkey, &to_pubkey, request.lamports);
-    
-    
-    let instruction_data_b64 = general_purpose::STANDARD.encode(&instruction.data);
-
-    let response = SendSolResponse {
-        success: true,
-        data: Some(SendSolData {
-            program_id: instruction.program_id.to_string(),
-            accounts: instruction
-                .accounts
-                .iter()
-                .map(|account| account.pubkey.to_string())
-                .collect(),
-            instruction_data: instruction_data_b64,
-        }),
-        error: None,
-    };
-
-    web::Json(response)
-}
-
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-
-    let port = "0.0.0.0:8080";
-    println!("Server is Running on http://{}", port);
-
-    HttpServer::new(|| {
-        App::new()
-            .service(keypair_generate)
-            .service(sign_message)
-            .service(verify_message)
-            .service(send_sol)
-           
-    })
-    .bind(port)?
-    .run()
-    .await
 }
