@@ -8,6 +8,7 @@ use base64::{engine::general_purpose, Engine};
 use spl_token::instruction::mint_to;
 use serde_json::json;
 use solana_sdk::signature::Signature;
+use solana_sdk::system_instruction;
 
 
 #[derive(Serialize)]
@@ -95,6 +96,27 @@ struct VerifyMessageData {
     message: String,
     pubkey: String,
 }
+
+#[derive(Deserialize)]
+struct SendSolRequest {
+    from: String,
+    to: String,
+    lamports: u64,
+}
+
+#[derive(Serialize)]
+struct SendSolResponse {
+    success: bool,
+    data: SendSolData,
+}
+
+#[derive(Serialize)]
+struct SendSolData {
+    program_id: String,
+    accounts: Vec<String>,
+    instruction_data: String,
+}
+
 
 
 
@@ -359,6 +381,81 @@ fn main() {
                                 valid,
                                 message: data.message,
                                 pubkey: pubkey.to_string(),
+                            },
+                        };
+
+                        let json = serde_json::to_string(&response_data).unwrap();
+                        let response = Response::from_string(json)
+                            .with_status_code(200)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    } else {
+                        let response = Response::from_string(
+                            json!({ "success": false, "error": "Invalid JSON" }).to_string()
+                        )
+                        .with_status_code(400)
+                        .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+
+                        let _ = request.respond(response);
+                    }
+                }
+
+            (&Method::Post, "/send/sol") => {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+
+                    let req_data: Result<SendSolRequest, _> = serde_json::from_str(&content);
+
+                    if let Ok(data) = req_data {
+                        // Validate inputs
+                        let from_pubkey = match Pubkey::from_str(&data.from) {
+                            Ok(pk) => pk,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid sender address" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        let to_pubkey = match Pubkey::from_str(&data.to) {
+                            Ok(pk) => pk,
+                            Err(_) => {
+                                let response = Response::from_string(
+                                    json!({ "success": false, "error": "Invalid recipient address" }).to_string()
+                                )
+                                .with_status_code(400)
+                                .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        };
+
+                        if data.lamports == 0 {
+                            let response = Response::from_string(
+                                json!({ "success": false, "error": "Transfer amount must be greater than zero" }).to_string()
+                            )
+                            .with_status_code(400)
+                            .with_header(Header::from_bytes(b"Content-Type", b"application/json").unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        // Create transfer instruction
+                        let ix = system_instruction::transfer(&from_pubkey, &to_pubkey, data.lamports);
+
+                        let accounts = ix.accounts.iter().map(|meta| meta.pubkey.to_string()).collect::<Vec<_>>();
+
+                        let response_data = SendSolResponse {
+                            success: true,
+                            data: SendSolData {
+                                program_id: ix.program_id.to_string(),
+                                accounts,
+                                instruction_data: base64::engine::general_purpose::STANDARD.encode(ix.data),
                             },
                         };
 
